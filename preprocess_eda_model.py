@@ -1,7 +1,6 @@
 # ---
 # jupyter:
 #   jupytext:
-#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -14,7 +13,7 @@
 # ---
 
 # %% [markdown] id="JOFHQM8s86AI"
-# # Calculate Distance
+# # Calculate distance from startups to company A
 
 # %% id="8yEO_E_qWCgH"
 import numpy as np
@@ -27,15 +26,12 @@ import matplotlib.pyplot as plt
 # %% colab={"base_uri": "https://localhost:8080/", "height": 895} id="DOd6f1id85Um" outputId="48eb0f64-0ecf-42dd-ba87-54e593003f4f"
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
-df = pd.read_excel(r"C:\Users\Admin\Documents\Studio Code\Startup\Germany Startups Dataset.xlsx", sheet_name='Encoded')
+df = pd.read_excel(r"C:\Users\Admin\Documents\Studio Code\startup_partnerships\Germany Startups Dataset.xlsx", sheet_name='Encoded')
 df
 
 # %% id="xJz-pRQ6-6_l"
 compA = (50.1235823,8.5727836)
-
 df['dist_A'] = df.apply(lambda row: geodesic((row['Latitude'], row['Longitude']), compA).kilometers, axis=1)
-
-# %% colab={"base_uri": "https://localhost:8080/", "height": 458} id="YyufpmV2CUP-" outputId="b46e51e0-f529-4cff-ffa3-d247ab638c0f"
 df['dist_A']
 
 # %% id="T2ADVnpwCeiq"
@@ -198,8 +194,12 @@ plt.show()
 # %% [markdown] id="r5y6quuh2TK_"
 # # Feature Selection
 
+# %%
+import pandas as pd
+import matplotlib.pyplot as plt
+
 # %% colab={"base_uri": "https://localhost:8080/", "height": 461} id="lAAtvWwzbCCA" outputId="98eb8a17-30e9-4c2d-8dbf-b820a1da35b9"
-df = pd.read_excel('data2_after_imputed.xlsx')
+df = pd.read_excel(r"C:\Users\Admin\Documents\Studio Code\startup_partnerships\data2_after_imputed.xlsx")
 df
 
 # %% id="p4sUx8aV2Ou1"
@@ -273,8 +273,66 @@ print(df_final.head())
 # %% id="0QhesTzwX0KR"
 df_feature_selection = df_final
 
-# %% colab={"base_uri": "https://localhost:8080/", "height": 423} id="i8-Q3X6ox72H" outputId="05b19bf1-571b-4456-82e2-7174e53bc23b"
-df_feature_selection
+# %% [markdown]
+# # NEGATIVE LABELLING (Cluster)
+
+# %%
+#update 29.05.2025 (reviewing)
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+
+# %%
+#Scale features 
+features = [col for col in df_feature_selection.columns if col != 'high_potential']
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(df_feature_selection[features])
+X_scaled_df = pd.DataFrame(X_scaled, columns=features)
+
+
+# %%
+#Clustering
+kmeans = KMeans(n_clusters=10, random_state=42)
+df_feature_selection['cluster'] = kmeans.fit_predict(X_scaled)
+
+partner_clusters = df_feature_selection[df_feature_selection['high_potential'] == 1]['cluster'].unique()
+negative_pool = df_feature_selection[(df_feature_selection['high_potential'] == 0) & (~df_feature_selection['cluster'].isin(partner_clusters))]
+
+len(negative_pool) #=66 negative samples only -> too little
+
+# %%
+#relax the condition: get clusters also for those that have little positive:negative sample ratio
+cluster_counts = df_feature_selection.groupby('cluster')['high_potential'].value_counts().unstack().fillna(0)
+cluster_counts['positive_ratio'] = cluster_counts[1] / (cluster_counts[0] + cluster_counts[1])
+
+# Keep clusters where most samples are NOT positive
+safe_clusters = cluster_counts[cluster_counts['positive_ratio'] < 0.03].index
+
+negative_pool = df_feature_selection[(df_feature_selection['high_potential'] == 0) & (df_feature_selection['cluster'].isin(safe_clusters))]
+len(negative_pool)
+
+
+# %%
+positive_samples = df_feature_selection[df_feature_selection['high_potential'] == 1]
+balanced_df = pd.concat([positive_samples, negative_pool]).reset_index(drop=True)
+balanced_df
+
+# %%
+#Visualize clusters
+from sklearn.manifold import TSNE
+
+tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+X_tsne = tsne.fit_transform(X_scaled)
+
+df['TSNE1'] = X_tsne[:, 0]
+df['TSNE2'] = X_tsne[:, 1]
+
+plt.figure(figsize=(6,6))
+sns.scatterplot(data=df, x='TSNE1', y='TSNE2', hue='high_potential', palette='Set1')
+plt.title("t-SNE Visualization of Partner vs Non-Partner")
+
+plt.show()
 
 # %% [markdown] id="HzoR6Im2F8-r"
 # # MODELLING
@@ -284,40 +342,28 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_recall_fscore_support
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
-from sklearn.naive_bayes import BernoulliNB
+from xgboost import XGBClassifier
 from sklearn.metrics import roc_curve, auc
 from matplotlib import pyplot
 from sklearn.metrics import precision_recall_curve
 
-# %% colab={"base_uri": "https://localhost:8080/"} id="_mBWEd8kTnLE" outputId="4fd780bf-ee5a-4d19-fb82-a9963fa12c89"
-from sklearn.model_selection import train_test_split
+# %%
+X = balanced_df.drop(columns=['high_potential', 'cluster'])  # drop cluster and target
+y = balanced_df['high_potential']
 
-# Stratified split to maintain proportions of the target variable
-df_train, df_test = train_test_split(df_feature_selection,
-                                     train_size=0.7,
-                                     test_size=0.3,
-                                     random_state=100,
-                                     stratify=df_feature_selection['high_potential'])
+#Train/test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, stratify=y, random_state=42
+)
 
-# Separate target variable and features for train and test sets
-y_train = df_train['high_potential']
-X_train = df_train.drop(columns='high_potential')
-y_test = df_test['high_potential']
-X_test = df_test.drop(columns='high_potential')
-
-# Check the distribution in train and test sets
-print("Training set class distribution:\n", y_train.value_counts())
-print("Test set class distribution:\n", y_test.value_counts())
+print("Training set:\n", y_train.value_counts())
+print("Test set:\n", y_test.value_counts())
 
 
 # %% [markdown] id="jJde6o_oTkCL"
-# ## NO smote
-
-# %% colab={"base_uri": "https://localhost:8080/", "height": 178} id="SJfTncU9ihIo" outputId="82ab2ba5-82ed-4220-b025-b4ee2ab29637"
-y_train.value_counts()
+# ## NO SMOTE
 
 # %% [markdown] id="rMB61HWsUBlQ"
 # ### Logistic Regression
@@ -325,7 +371,7 @@ y_train.value_counts()
 # %% id="oeh_b5iQUAEr"
 model_lr = LogisticRegression(random_state=42)
 model_lr.fit(X_train, y_train)
-predicted_probs = model_lr.predict_proba(X_test)[:, 1]  # Predicted probabilities for class 0
+predicted_probs = model_lr.predict_proba(X_test)[:, 1]  # Predicted probabilities for class 1
 y_pred = model_lr.predict(X_test)
 lr_score = accuracy_score(y_test, y_pred)
 
@@ -344,8 +390,61 @@ class1_metrics = pd.DataFrame({
 
 class1_metrics
 
-# %% colab={"base_uri": "https://localhost:8080/", "height": 178} id="P_my-jPdhjpN" outputId="9c6b654c-ce44-43a1-bc32-f2b083908d02"
-df_feature_selection['high_potential'].value_counts()
+# %%
+#check data leakage
+overlap = set(X_train.index).intersection(set(X_test.index))
+overlap #nothing means no overlap
+
+# %%
+models = {
+    'Logistic Regression': LogisticRegression(max_iter=1000, random_state=42),
+    'Random Forest': RandomForestClassifier(max_depth=3, random_state=42),
+    'XGBoost': XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42),
+    'SVM': SVC(probability=True, random_state=42)
+}
+
+metrics = {
+    'Metric': ['Precision', 'Recall', 'F1-Score', 'Support', 'Accuracy']
+}
+
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    precision, recall, f1_score, support = precision_recall_fscore_support(
+        y_test, y_pred, pos_label=1, average='binary'
+    )
+    acc = accuracy_score(y_test, y_pred)
+
+    metrics[name] = [precision, recall, f1_score, support, acc]
+
+class1_metrics = pd.DataFrame(metrics)
+class1_metrics
+
+# %%
+#test using kfold
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+models = {
+    "Logistic Regression": Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(max_iter=1000))
+    ]),
+    "Random Forest": RandomForestClassifier(max_depth=5, random_state=42),
+    "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', max_depth=5, random_state=42),
+    "SVM": Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', SVC(probability=True))
+    ])
+}
+
+for name, model in models.items():
+    scores = cross_val_score(model, X, y, cv=cv, scoring='precision')
+    print(f"{name}: mean precision = {scores.mean():.3f}, std = {scores.std():.3f}")
 
 
 # %% colab={"base_uri": "https://localhost:8080/", "height": 472} id="pfD6Qdg6x0ja" outputId="2c591602-7e04-478c-ede6-0fcc9d715b23"
@@ -358,28 +457,82 @@ plt.show()
 # %% [markdown] id="zthLiTk3YFE3"
 # # Modelling (with resampling SMOTE)
 
-# %% colab={"base_uri": "https://localhost:8080/", "height": 513} id="5ggisB1oYCZ7" outputId="3744117f-aaa1-4126-d61f-a9c1dc2eea0f"
+# %%
 from imblearn.over_sampling import SMOTE
-# Resampling the minority class. The strategy can be changed as required.
-sm = SMOTE(sampling_strategy='minority', random_state=42)
-# Fit the model to generate the data.
-oversampled_X, oversampled_Y = sm.fit_resample(df_train.drop('high_potential', axis=1), df_train['high_potential'])
-oversampled = pd.concat([pd.DataFrame(oversampled_Y), pd.DataFrame(oversampled_X)], axis=1)
-oversampled
+balanced_df_clean = balanced_df.drop_duplicates(subset=balanced_df.columns.difference(['high_potential']))
 
-# %% colab={"base_uri": "https://localhost:8080/", "height": 423} id="YEU_kdp8YaCO" outputId="87b4e67b-87e3-45c5-98ee-d83e4e121dc9"
-df_train, df_test = train_test_split(oversampled, train_size = 0.7, test_size = 0.3, random_state = 100)
+X = balanced_df_clean.drop(columns=['high_potential'])
+y = balanced_df_clean['high_potential']
+
+# Separate positives and negatives
+positives = balanced_df_clean[balanced_df_clean['high_potential'] == 1]
+negatives = balanced_df_clean[balanced_df_clean['high_potential'] == 0]
+
+# Set desired number of positives and negatives for test set
+n_pos_test = 15
+n_neg_test = 35
+
+# Sample test set
+test_pos = positives.sample(n=n_pos_test, random_state=42)
+test_neg = negatives.sample(n=n_neg_test, random_state=42)
+
+df_test = pd.concat([test_pos, test_neg])
+df_train = balanced_df_clean.drop(df_test.index)
+
+# Rebuild X/y
+X_train = df_train.drop(columns=['high_potential'])
 y_train = df_train['high_potential']
-X_train = df_train.drop(columns='high_potential')
+X_test = df_test.drop(columns=['high_potential'])
 y_test = df_test['high_potential']
-X_test = df_test.drop(columns='high_potential')
 
-df_train
+
+#Apply SMOTE on training set 
+sm = SMOTE(sampling_strategy='minority', random_state=42)
+oversampled_X, oversampled_Y = sm.fit_resample(
+    df_train.drop(columns=['high_potential']),
+    df_train['high_potential']
+)
+
+oversampled = pd.concat([
+    pd.DataFrame(oversampled_Y, columns=['high_potential']),
+    pd.DataFrame(oversampled_X, columns=df_train.drop(columns=['high_potential']).columns)
+], axis=1).reset_index(drop=True)
+
+# Check for leakage
+X_test_rows = X_test.reset_index(drop=True).copy()
+X_oversampled = oversampled.drop(columns=['high_potential'])
+
+leakage_rows = pd.merge(X_test_rows, X_oversampled, how='inner')
+print("Leakage", len(leakage_rows))
+
+# %%
+oversampled_Y.value_counts()
+
+# %%
+print(len(X_train),len(X_test))
+
+# %%
+y_test.value_counts()
 
 # %% [markdown] id="zHuw5KuZZP3u"
 # ### Logistic Regression
 
+# %%
+# Train logistic regression on oversampled data
+model_lr = LogisticRegression(random_state=42, max_iter=1000)
+model_lr.fit(oversampled_X, oversampled_Y)
+
+# Predict on the *original* test set
+predicted_probs = model_lr.predict_proba(X_test)[:, 1]  # Probabilities for class 1
+y_pred = model_lr.predict(X_test)
+
+# Accuracy
+lr_score = accuracy_score(y_test, y_pred)
+lr_score
+
+
 # %% id="8TVUGGLQZPeg"
+#OLD - SKIP
 model_lr = LogisticRegression(random_state=42)
 model_lr.fit(X_train, y_train)
 predicted_probs = model_lr.predict_proba(X_test)[:, 1]  # Predicted probabilities for class 0
@@ -394,6 +547,18 @@ class1_metrics = pd.DataFrame({
 })
 
 class1_metrics
+
+# %%
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
+
+model = LogisticRegression(random_state=42)
+model.fit(oversampled.drop(columns=['high_potential']), oversampled['high_potential'])
+
+y_pred = model.predict(X_test)
+
+# Classification report
+print(classification_report(y_test, y_pred, digits=3))
 
 # %% colab={"base_uri": "https://localhost:8080/", "height": 472} id="f58BSiG9yD18" outputId="5b229838-5a50-4ef3-ed43-6e06f7c8bda4"
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
@@ -420,12 +585,33 @@ coef_df_sorted = coef_df.sort_values(by='coefficient_abs', ascending=False)
 
 coef_df_sorted
 
+# %%
+corr_matrix = X_train.corr().abs()
+upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+# Find highly correlated pairs
+to_drop = [column for column in upper_tri.columns if any(upper_tri[column] > 0.95)]
+X_train = X_train.drop(columns=to_drop)
+X_train
+
+
+# %%
+import statsmodels.api as sm
+
+X_train_sm = sm.add_constant(X_train)
+model_sm = sm.Logit(y_train, X_train_sm).fit()
+print(model_sm.summary())
+
+
+# %%
+print(X_train.info())
+
+
 # %% colab={"base_uri": "https://localhost:8080/", "height": 352} id="AABq33UgckjG" outputId="b7d80537-2c51-45ac-b205-e132d8699d46"
 import statsmodels.api as sm
 import numpy as np
 
-# Fit logistic regression using statsmodels
-X_train_sm = sm.add_constant(X_train)  # Add intercept term for statsmodels
+X_train_sm = sm.add_constant(X_train)  
 model_sm = sm.Logit(y_train, X_train_sm).fit()
 
 # Get results
@@ -435,7 +621,7 @@ p_values = model_sm.pvalues
 conf_int = model_sm.conf_int()
 odds_ratios = np.exp(coefficients)
 
-# Create a DataFrame with all information
+# Create a df
 coef_df = pd.DataFrame({
     "Feature": coefficients.index,
     "Coefficient": coefficients.values,
@@ -464,7 +650,6 @@ X_train_with_probs_sorted = X_train_with_probs.sort_values(by="Predicted_Probabi
 X_train_with_probs_sorted.tail(20)
 
 # %% colab={"base_uri": "https://localhost:8080/", "height": 1000} id="JbNfPssJBMBa" outputId="8e2c7f59-5b12-4633-c4ee-3cacb59f9173"
-# Statsmodel
 from sklearn.metrics import confusion_matrix, classification_report, roc_auc_score, roc_curve, accuracy_score, precision_score, recall_score, f1_score
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -532,7 +717,6 @@ log_auc
 # %% id="7wFzz28FaP_e"
 from sklearn.model_selection import cross_val_score, KFold
 
-
 # %% colab={"base_uri": "https://localhost:8080/", "height": 362} id="0xY2fLlPaZl4" outputId="5707ed56-5304-4a84-d370-c9bfa7b934c8"
 #kfold
 X = df_feature_selection.drop(columns=['high_potential'], axis=1)
@@ -595,7 +779,6 @@ from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import pandas as pd
 
-# Define your features and target
 X = df_feature_selection.drop(columns=['high_potential'], axis=1)
 y = df_feature_selection['high_potential']
 
